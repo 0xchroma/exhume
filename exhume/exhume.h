@@ -4,6 +4,9 @@
 #include <vector>
 #include <map>
 #include <memory>
+#include <iostream>
+#include <ctime>
+#include <chrono>
 
 static std::string DIRECTORY_STRINGS[] = {
 	"IMAGE_DIRECTORY_ENTRY_EXPORT\0",
@@ -30,14 +33,61 @@ enum ImageType
 	DLL
 };
 
+#define exhumeRef			std::shared_ptr<exhume>
+
 #define ImportRef			std::shared_ptr<Import>
+#define ExportRef			std::shared_ptr<Export>
 #define ModuleRef			std::shared_ptr<Module>
 #define SectionRef			std::shared_ptr<Section>
 
 #define Directory			std::map<uint8_t, IMAGE_DATA_DIRECTORY>
+#define DirectoryRef		std::shared_ptr<Directory>
 #define DirectoryMap		std::map<uint8_t, Directory>
 
 #define ModuleMap			std::map<std::string, Module>
+
+class Section
+{
+public:
+	Section(IMAGE_SECTION_HEADER header, std::vector<unsigned char> data, 
+		DirectoryMap directories = {}) : m_Header(header),
+		m_Directories(directories), m_Data(data) {}
+
+	const IMAGE_SECTION_HEADER& Header() const { return m_Header; }
+	DirectoryMap Directories() const { return m_Directories; }
+	std::vector<unsigned char>& Data() { return m_Data; }
+
+private:
+	IMAGE_SECTION_HEADER m_Header = {};
+	std::map<uint8_t, std::map<uint8_t, IMAGE_DATA_DIRECTORY>> m_Directories;
+	std::vector<unsigned char> m_Data;
+};
+
+class Export
+{
+public:
+	Export(std::string name, uint32_t address, SectionRef section)
+		: m_Name(name), m_Ordinal(0), m_Address(address), m_FunctionSection(section)
+	{
+		if (section)
+			m_FunctionDataPointer = std::make_shared<unsigned char*>(&section->Data()[address - section->Header().VirtualAddress]);
+	}
+
+	std::string Name() const { return m_Name; }
+	uint16_t Ordinal() const { return m_Ordinal; }
+	uint32_t Address() const { return m_Address; }
+
+	SectionRef FunctionSection() const { return m_FunctionSection; }
+	std::shared_ptr<unsigned char*> FunctionDataPointer() const { return m_FunctionDataPointer; }
+
+private:
+	std::string m_Name;
+	uint16_t m_Ordinal;
+	uint32_t m_Address;
+
+	SectionRef m_FunctionSection = nullptr;
+	std::shared_ptr<unsigned char*> m_FunctionDataPointer = nullptr;
+};
 
 class Import
 {
@@ -68,26 +118,10 @@ private:
 	std::vector<Import> m_ImportEntries;
 };
 
-class Section
-{
-public:
-	Section(IMAGE_SECTION_HEADER header, std::vector<unsigned char> data, 
-		DirectoryMap directories = {}) : m_Header(header),
-		m_Directories(directories), m_Data(data) {}
-
-	const IMAGE_SECTION_HEADER& Header() const { return m_Header; }
-	DirectoryMap Directories() const { return m_Directories; }
-	const std::vector<unsigned char>& Data() const { return m_Data; }
-
-private:
-	IMAGE_SECTION_HEADER m_Header = {};
-	std::map<uint8_t, std::map<uint8_t, IMAGE_DATA_DIRECTORY>> m_Directories;
-	std::vector<unsigned char> m_Data;
-};
-
 class exhume
 {
 public:
+	exhume();
 	exhume(std::string path);
 	~exhume();
 
@@ -99,11 +133,17 @@ public:
 	SectionRef GetSection(std::string name);
 	SectionRef GetSection(uint8_t directory);
 
+	DirectoryRef GetDirectory(uint8_t directory);
+
 	bool AddSection(std::string name, std::vector<unsigned char> data, 
 		uint32_t characteristics = 0x60000020);
 
+	bool EntryPoint(std::string section_name, uint32_t offset = 0);
+	uint32_t EntryPoint() const { return m_NtHeaders.OptionalHeader.AddressOfEntryPoint; }
+
+	uint32_t Imagebase() const { return m_NtHeaders.OptionalHeader.ImageBase; }
+	
 	bool SerialiseImage(std::string path);
-	bool SerialiseImage(std::vector<unsigned char> data);
 
 	void DumpSections();
 	void DumpDirectories();
@@ -116,6 +156,7 @@ private:
 	bool ParseSections();
 	bool ParseImports();
 	bool ParseExports();
+	bool ParseResources();
 
 private:
 	bool m_Success = false;
@@ -123,10 +164,11 @@ private:
 	std::vector<unsigned char> m_OriginalImageData;
 
 	ImageType m_ImageType;
-	IMAGE_DOS_HEADER m_Dosheader;
-	IMAGE_NT_HEADERS32 m_NtHeaders;
+	IMAGE_DOS_HEADER m_Dosheader = {};
+	IMAGE_NT_HEADERS32 m_NtHeaders = {};
 	std::vector<Section> m_Sections;
 	ModuleMap m_ImportModules;
+	std::vector<Export> m_Exports;
 
 private:
 	static bool ReadFile(std::string path, std::vector<unsigned char>& data);

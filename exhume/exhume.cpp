@@ -1,6 +1,49 @@
 #include "exhume.h"
 
-#include <iostream>
+exhume::exhume()
+{
+	auto time_now = std::chrono::system_clock::now();
+	auto sec_since_epoch = std::chrono::duration_cast<std::chrono::seconds>(time_now.time_since_epoch()).count();
+
+	m_ImageType = ImageType::EXE;
+
+	m_Dosheader.e_magic = 0x5A4D;
+	m_Dosheader.e_lfanew = 0xE8;
+
+	m_NtHeaders.Signature = 0x4550;
+	m_NtHeaders.FileHeader.Machine = IMAGE_FILE_MACHINE_I386;
+	m_NtHeaders.FileHeader.NumberOfSections = 0;
+	m_NtHeaders.FileHeader.TimeDateStamp = static_cast<uint32_t>(sec_since_epoch);
+	m_NtHeaders.FileHeader.SizeOfOptionalHeader = sizeof(IMAGE_OPTIONAL_HEADER32);
+
+	m_NtHeaders.FileHeader.Characteristics = IMAGE_FILE_RELOCS_STRIPPED	&
+		IMAGE_FILE_32BIT_MACHINE & IMAGE_FILE_DEBUG_STRIPPED;
+
+	m_NtHeaders.FileHeader.Characteristics = m_ImageType == ImageType::EXE ? IMAGE_FILE_EXECUTABLE_IMAGE : IMAGE_FILE_DLL;
+
+	m_NtHeaders.OptionalHeader.Magic = IMAGE_NT_OPTIONAL_HDR32_MAGIC;
+	m_NtHeaders.OptionalHeader.MajorLinkerVersion = 0x09;
+	m_NtHeaders.OptionalHeader.MinorLinkerVersion = 0x00;
+	m_NtHeaders.OptionalHeader.ImageBase = 0x400000;
+	m_NtHeaders.OptionalHeader.SectionAlignment = 0x1000;
+	m_NtHeaders.OptionalHeader.FileAlignment = 0x200;
+	m_NtHeaders.OptionalHeader.MajorOperatingSystemVersion = 0x05;
+	m_NtHeaders.OptionalHeader.MinorOperatingSystemVersion = 0x00;
+	m_NtHeaders.OptionalHeader.MajorSubsystemVersion = 0x05;
+	m_NtHeaders.OptionalHeader.MinorSubsystemVersion = 0x00;
+	m_NtHeaders.OptionalHeader.SizeOfImage = m_NtHeaders.OptionalHeader.FileAlignment;
+	m_NtHeaders.OptionalHeader.Subsystem = IMAGE_SUBSYSTEM_WINDOWS_CUI;
+	m_NtHeaders.OptionalHeader.SizeOfStackReserve = 0x100000;
+	m_NtHeaders.OptionalHeader.SizeOfStackCommit = 0x1000;
+	m_NtHeaders.OptionalHeader.SizeOfHeapReserve = 0x100000;
+	m_NtHeaders.OptionalHeader.SizeOfHeapCommit = 0x1000;
+	m_NtHeaders.OptionalHeader.NumberOfRvaAndSizes = 0x10;
+
+	m_NtHeaders.OptionalHeader.SizeOfHeaders = m_Dosheader.e_lfanew + sizeof(IMAGE_NT_HEADERS32);
+
+	m_Success = true;
+}
+
 
 exhume::exhume(std::string path)
 {
@@ -13,30 +56,48 @@ exhume::exhume(std::string path)
 	}
 
 	if (data.size() < sizeof(IMAGE_DOS_HEADER))
+	{
+		std::cout << "ERROR: Image is too small." << std::endl;
 		return;
+	}
 
-	if (std::string(data.begin(), data.end()).substr(0, 2).find("MZ") != 0)
+	if (memcmp(&data[0], "MZ", 2) != 0)
 	{
 		std::cout << "ERROR: Invalid PE signature (MZ)." << std::endl;
 		return;
 	}
 
-	// turns out std::copy is literally 'first = last;'
 	m_OriginalImageData.resize(data.size());
 	std::copy(data.begin(), data.end(), m_OriginalImageData.begin());
 
+	std::cout << "Parsing headers.." << std::endl;
 	if (!ParseHeaders())
+	{
+		std::cout << "ERROR: Failed to parse headers" << std::endl;
 		return;
+	}
 
+	std::cout << "Parsing sections.." << std::endl;
 	if (!ParseSections())
+	{
+		std::cout << "ERROR: Failed to parse sections" << std::endl;
 		return;
+	}
 
+	std::cout << "Parsing import table.." << std::endl;
 	if (!ParseImports())
-		return;
+	{
+		std::cout << "ERROR: Failed to parse import table" << std::endl;
+	}
 
 	if (m_ImageType == ImageType::DLL)
+	{
+		std::cout << "Parsing export table.." << std::endl;
 		if (!ParseExports())
-			return;
+		{
+			std::cout << "ERROR: Failed to parse export table" << std::endl;
+		}
+	}
 
 	m_Success = true;
 }
@@ -80,21 +141,21 @@ bool exhume::ParseSections()
 	{
 		IMAGE_SECTION_HEADER header = {};
 		DirectoryMap directories;
-		std::vector<unsigned char> data;
+		std::vector<unsigned char> section_data;
 
 		memcpy(&header, &m_OriginalImageData[section_header_offset], sizeof(IMAGE_SECTION_HEADER));
 
 		// some sections do not exist on file. (uninitialised data)
 		if (header.SizeOfRawData > 0)
 		{
-			data.resize(header.SizeOfRawData);
+			section_data.resize(header.SizeOfRawData);
 
 			try
 			{
 				std::copy(
 					m_OriginalImageData.begin() + header.PointerToRawData,
 					m_OriginalImageData.begin() + header.PointerToRawData + header.SizeOfRawData,
-					data.begin());
+					section_data.begin());
 			} catch (const std::exception& e)
 			{
 				std::cout << "EXCEPTION: " << e.what() << std::endl;
@@ -113,7 +174,7 @@ bool exhume::ParseSections()
 			}
 		}
 
-		m_Sections.push_back({ header, data, directories });
+		m_Sections.push_back({ header, section_data, directories });
 
 		section_header_offset += sizeof(IMAGE_SECTION_HEADER);
 	}
@@ -126,8 +187,8 @@ bool exhume::ParseImports()
 	SectionRef import_section = nullptr;
 	IMAGE_DATA_DIRECTORY import_directory = {};
 	IMAGE_IMPORT_DESCRIPTOR import_descriptor = {};
-	size_t section_va = 0;
-	size_t descriptor_offset = 0;
+	uint32_t section_va = 0;
+	uint32_t descriptor_offset = 0;
 
 	if ((import_section = GetSection(IMAGE_DIRECTORY_ENTRY_IMPORT)) == nullptr)
 		return false;
@@ -135,8 +196,12 @@ bool exhume::ParseImports()
 	for (auto& directory : import_section->Directories())
 	{
 		if (directory.first == IMAGE_DIRECTORY_ENTRY_IMPORT)
+		{
 			if ((import_directory = directory.second[IMAGE_DIRECTORY_ENTRY_IMPORT]).VirtualAddress == 0)
 				return false;
+
+			break;
+		}
 	}
 
 	section_va = import_section->Header().VirtualAddress;
@@ -163,7 +228,7 @@ bool exhume::ParseImports()
 		{
 			if (thunk.u1.Ordinal & IMAGE_ORDINAL_FLAG32)
 			{
-				auto function_ordinal = IMAGE_ORDINAL32(thunk.u1.Ordinal);
+				uint16_t function_ordinal = IMAGE_ORDINAL32(thunk.u1.Ordinal);
 				m_ImportModules[module_name].AddImport(function_ordinal);
 			}
 			else
@@ -186,9 +251,63 @@ bool exhume::ParseImports()
 bool exhume::ParseExports()
 {
 	SectionRef export_section = nullptr;
+	IMAGE_DATA_DIRECTORY export_directory = {};
+	IMAGE_EXPORT_DIRECTORY export_table_directory = {};
+	uint32_t section_va = 0;
+	uint32_t directory_offset = 0;
+	uint32_t export_count = 0;
 
 	if ((export_section = GetSection(IMAGE_DIRECTORY_ENTRY_EXPORT)) == nullptr)
 		return false;
+
+	for (auto& directory : export_section->Directories())
+	{
+		if (directory.first == IMAGE_DIRECTORY_ENTRY_EXPORT)
+		{
+			if ((export_directory = directory.second[IMAGE_DIRECTORY_ENTRY_EXPORT]).VirtualAddress == 0)
+				return false;
+		
+			break;
+		}
+	}
+
+	section_va = export_section->Header().VirtualAddress;
+	directory_offset = export_directory.VirtualAddress - section_va;
+	memcpy(&export_table_directory, &export_section->Data()[directory_offset], sizeof(IMAGE_EXPORT_DIRECTORY));
+
+	// only parsing exported functions with names (for now)
+	if ((export_count = export_table_directory.NumberOfNames) == 0)
+	{
+		std::cout << "ERROR: DLL has no named exports" << std::endl;
+		return false;
+	}
+
+	auto name_array = reinterpret_cast<const uint32_t*>(&export_section->Data()[export_table_directory.AddressOfNames - section_va]);
+	auto ordinal_name_array = reinterpret_cast<const uint16_t*>(&export_section->Data()[export_table_directory.AddressOfNameOrdinals - section_va]);
+	auto function_address_array = reinterpret_cast<const uint32_t*>(&export_section->Data()[export_table_directory.AddressOfFunctions - section_va]);
+
+	for (unsigned i = 0; i < export_count; i++)
+	{
+		auto function_name = reinterpret_cast<const char*>(&export_section->Data()[name_array[i] - section_va]);
+		auto ordinal_name = ordinal_name_array[i];
+		auto function_address = function_address_array[ordinal_name];
+
+		SectionRef function_section = nullptr;
+
+		for (auto section : m_Sections)
+		{
+			if (function_address >= section.Header().VirtualAddress && 
+				function_address <= section.Header().VirtualAddress + section.Header().Misc.VirtualSize)
+			{
+				function_section = std::make_shared<Section>(section);
+				break;
+			}
+		}
+		
+		m_Exports.push_back({ function_name, function_address, function_section });
+	}
+
+	return true;
 }
 
 
@@ -213,6 +332,22 @@ SectionRef exhume::GetSection(uint8_t directory)
 		{
 			if (dir.first == directory)
 				return std::make_shared<Section>(section);
+		}
+	}
+
+	return nullptr;
+}
+
+DirectoryRef exhume::GetDirectory(uint8_t directory)
+{
+	SectionRef directory_section = nullptr;
+
+	if ((directory_section = GetSection(directory)) != nullptr)
+	{
+		for (auto directory_entry : directory_section->Directories())
+		{
+			if (directory_entry.first == directory)
+				return std::make_shared<Directory>(directory_entry.second);
 		}
 	}
 
@@ -244,23 +379,26 @@ bool exhume::AddSection(std::string name, std::vector<unsigned char> data, uint3
 			return address + (size / alignment + 1) * alignment;
 	};
 
-	if ((previous_section = std::make_shared<Section>(m_Sections.at(section_count-1))) == nullptr)
+	if (m_Sections.empty())
 	{
 		// no previous section. align new section to alignment values in optional header
 
 		memcpy(&new_header.Name[0], &name[0], (name.size() > 8) ? 8 : name.size());
 
-		new_header.VirtualAddress = section_alignment;
+		new_header.VirtualAddress = align(section_alignment, section_alignment, 0);
 		new_header.Misc.VirtualSize = align(data.size(), section_alignment, 0);
-		new_header.PointerToRawData = section_header_offset + sizeof(IMAGE_SECTION_HEADER);
+		new_header.PointerToRawData = align(section_header_offset + sizeof(IMAGE_SECTION_HEADER), file_alignment, 0);
 		new_header.SizeOfRawData = align(data.size(), file_alignment, 0);
 
 		new_header.Characteristics = characteristics;
 
-		m_NtHeaders.OptionalHeader.BaseOfCode = new_header.PointerToRawData;
+		m_NtHeaders.OptionalHeader.BaseOfCode = new_header.VirtualAddress;
+		m_NtHeaders.OptionalHeader.AddressOfEntryPoint = new_header.VirtualAddress;
 	}
 	else
 	{
+		previous_section = std::make_shared<Section>(m_Sections.back());
+		
 		// previous section exists. check header space
 		if (section_header_offset + (sizeof(IMAGE_SECTION_HEADER) * (section_count + 1)) >= previous_section->Header().PointerToRawData)
 		{
@@ -287,13 +425,35 @@ bool exhume::AddSection(std::string name, std::vector<unsigned char> data, uint3
 	m_Sections.push_back({ new_header, data });
 
 	m_NtHeaders.FileHeader.NumberOfSections = m_Sections.size();
+	m_NtHeaders.OptionalHeader.SizeOfHeaders += sizeof(IMAGE_SECTION_HEADER);
 	m_NtHeaders.OptionalHeader.SizeOfImage = new_header.VirtualAddress + new_header.Misc.VirtualSize;
 
 	return true;
 }
 
+bool exhume::EntryPoint(std::string section_name, uint32_t offset)
+{
+	SectionRef section = nullptr;
+
+	if (section_name.empty())
+	{
+		m_NtHeaders.OptionalHeader.AddressOfEntryPoint = offset;
+		return true;
+	}
+
+	if ((section = GetSection(section_name)) != nullptr)
+	{
+		m_NtHeaders.OptionalHeader.AddressOfEntryPoint = (section->Header().VirtualAddress + offset);
+		return true;
+	}
+
+	return false;
+}
+
+
 bool exhume::SerialiseImage(std::string path)
 {
+	SectionRef last_section = nullptr;
 	std::vector<unsigned char> serialised_image;
 
 	if (!m_Success)
@@ -302,10 +462,27 @@ bool exhume::SerialiseImage(std::string path)
 		return false;
 	}
 
-	serialised_image.resize(m_NtHeaders.OptionalHeader.SizeOfImage);
+	if ((last_section = std::make_shared<Section>(m_Sections.back())) == nullptr)
+	{
+		std::cout << "ERROR: Image has no sections" << std::endl;
+		return false;
+	}
+
+	serialised_image.resize(last_section->Header().PointerToRawData + last_section->Header().SizeOfRawData);
 
 	const auto dos_header_pointer = reinterpret_cast<unsigned char*>(&m_Dosheader);
 	std::copy(&dos_header_pointer[0], &dos_header_pointer[sizeof(IMAGE_DOS_HEADER)], serialised_image.begin());
+
+	std::string dos_string = "Modified using exhume :D (Hi from @olibroken)";
+	std::copy(dos_string.begin(), dos_string.end(), serialised_image.begin() + sizeof(IMAGE_DOS_HEADER));
+
+	for (auto i = 0; i < 15; i++)
+	{
+		DirectoryRef directory = nullptr;
+
+		if ((directory = GetDirectory(i)) != nullptr)
+			memcpy(&m_NtHeaders.OptionalHeader.DataDirectory[i], &directory->at(i), sizeof(IMAGE_DATA_DIRECTORY));
+	}
 	
 	auto nt_header_offset = m_Dosheader.e_lfanew;
 	const auto nt_header_pointer = reinterpret_cast<unsigned char*>(&m_NtHeaders);
@@ -425,15 +602,39 @@ void exhume::DumpImports()
 	}
 }
 
+void exhume::DumpExports()
+{
+	if (!m_Success)
+	{
+		std::cout << "ERROR: Image was not parsed" << std::endl;
+		return;
+	}
+
+	for (auto export_entry : m_Exports)
+	{
+		std::cout << export_entry.Name().c_str() << std::endl;
+		std::cout << "\t0x" << std::hex << export_entry.Address() << std::endl;
+		std::cout << "\t->" << export_entry.FunctionSection()->Header().Name << std::endl;
+		std::cout << std::endl;
+	}
+}
+
 bool exhume::ReadFile(std::string path, std::vector<unsigned char>& data)
 {
 	HANDLE file_handle = INVALID_HANDLE_VALUE;
 	DWORD bytes_read = 0;
 
-	if ((file_handle = CreateFileA(path.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr)) == nullptr)
+	if ((file_handle = CreateFileA(path.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr)) == INVALID_HANDLE_VALUE)
 		return false;
 
-	data.resize(GetFileSize(file_handle, nullptr));
+	try {
+		data.resize(GetFileSize(file_handle, nullptr));
+	} catch (const std::exception& e)
+	{
+		std::cout << "ERROR: exception resizing vector. " << e.what() << std::endl;
+		CloseHandle(file_handle);
+		return false;
+	}
 
 	if (!::ReadFile(file_handle, &data[0], data.size(), &bytes_read, nullptr))
 	{
@@ -451,7 +652,7 @@ bool exhume::WriteFile(std::string path, std::vector<unsigned char> data)
 	HANDLE file_handle = INVALID_HANDLE_VALUE;
 	DWORD bytes_written = 0;
 
-	if ((file_handle = CreateFileA(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr)) == nullptr)
+	if ((file_handle = CreateFileA(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr)) == INVALID_HANDLE_VALUE)
 		return false;
 
 	if (!::WriteFile(file_handle, &data[0], data.size(), &bytes_written, nullptr))
