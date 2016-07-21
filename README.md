@@ -13,7 +13,7 @@ This is a work in progress. Expect bugs please :)
 
 # usage
 ##If you simply want to parse:
-###<img src="https://github.com/olibroken/exhume/raw/master/readme_images/parse.PNG">
+###<img src="https://github.com/olibroken/exhume/raw/master/readme_images/parse.PNG" width="450" height="320">
 
 ##Of if you want to go deeper:
-###<img src="https://github.com/olibroken/exhume/raw/master/readme_images/jmp.PNG" width="700" height="700">
+###<img src="https://github.com/olibroken/exhume/raw/master/readme_images/jmp.PNG" width="650" height="650">
